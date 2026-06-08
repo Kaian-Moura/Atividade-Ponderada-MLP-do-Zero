@@ -134,3 +134,157 @@ class MLP:
         """
         probabilities = self.forward(X)
         return np.argmax(probabilities, axis=1)
+    
+    def backward(self, y_true):
+        """
+        Backpropagation — calcula os gradientes de todos os pesos e biases.
+        
+        O backprop usa a regra da cadeia (chain rule) para propagar o erro
+        da saída de volta até a primeira camada. Para cada camada, calculamos:
+        
+        1. O "delta" (erro local da camada):
+           - Última camada: delta = dL/dz = (y_pred - y_true) / N
+             (gradiente combinado de softmax + cross-entropy)
+           - Camadas ocultas: delta = (delta_próxima @ W_próxima.T) * relu'(z)
+             (erro propagado da camada seguinte, modulado pela derivada da ativação)
+        
+        2. Os gradientes dos pesos e biases:
+           - dL/dW = a_anterior.T @ delta
+             (cada peso contribui proporcionalmente à ativação que ele recebeu
+              e ao erro que ele propagou)
+           - dL/db = soma dos deltas ao longo do batch
+             (o bias contribui igualmente para todas as amostras)
+        
+        Parâmetros:
+            y_true (np.ndarray): Rótulos one-hot, shape (batch_size, num_classes)
+        
+        Retorna:
+            tuple: (grad_weights, grad_biases) — listas de gradientes para cada camada
+        """
+        grad_weights = [None] * self.num_layers
+        grad_biases = [None] * self.num_layers
+        
+        # --- Última camada (softmax + cross-entropy) ---
+        # O gradiente combinado é simplesmente (y_pred - y_true) / N
+        # Isso é o "delta" da última camada
+        delta = cross_entropy_gradient(self.a_values[-1], y_true)
+        
+        # Gradiente dos pesos: a_anterior.T @ delta
+        # a_values[-2] é a ativação da penúltima camada (entrada da última)
+        grad_weights[-1] = self.a_values[-2].T @ delta
+        
+        # Gradiente do bias: soma dos deltas (média já está embutida no delta)
+        grad_biases[-1] = np.sum(delta, axis=0, keepdims=True)
+        
+        # --- Camadas ocultas (de trás para frente) ---
+        # Percorremos da penúltima camada até a primeira
+        for i in range(self.num_layers - 2, -1, -1):
+            # Propaga o delta para a camada anterior:
+            # delta_novo = delta_atual @ W_atual.T * relu'(z_atual)
+            #
+            # Intuitivamente: o erro de cada neurônio nesta camada é proporcional
+            # a quanto ele contribuiu para o erro da camada seguinte (via pesos)
+            # multiplicado por "quanto a ativação estava ligada" (derivada da ReLU)
+            delta = (delta @ self.weights[i + 1].T) * relu_derivative(self.z_values[i])
+            
+            # Gradientes dos pesos e biases desta camada
+            grad_weights[i] = self.a_values[i].T @ delta
+            grad_biases[i] = np.sum(delta, axis=0, keepdims=True)
+        
+        return grad_weights, grad_biases
+    
+    def train(self, X_train, y_train, epochs=20, batch_size=64, learning_rate=0.1,
+              X_val=None, y_val=None):
+        """
+        Treina a rede usando mini-batch SGD.
+        
+        Em cada época:
+        1. Embaralha os dados (para que os mini-batches sejam diferentes a cada época)
+        2. Divide os dados em mini-batches
+        3. Para cada mini-batch:
+           a. Forward pass (calcula predições)
+           b. Calcula a loss
+           c. Backward pass (calcula gradientes)
+           d. Atualiza pesos com SGD
+        4. Registra loss e acurácia da época
+        
+        O uso de mini-batches em vez do dataset inteiro (batch gradient descent)
+        tem duas vantagens:
+        - É mais rápido (não precisa processar 60k amostras por atualização)
+        - O ruído no gradiente pode ajudar a escapar de mínimos locais
+        
+        Parâmetros:
+            X_train (np.ndarray): Dados de treino, shape (n_samples, n_features)
+            y_train (np.ndarray): Rótulos one-hot, shape (n_samples, num_classes)
+            epochs (int): Número de épocas de treinamento
+            batch_size (int): Tamanho de cada mini-batch
+            learning_rate (float): Taxa de aprendizado do SGD
+            X_val (np.ndarray, optional): Dados de validação para acompanhar acurácia
+            y_val (np.ndarray, optional): Rótulos de validação (one-hot)
+        
+        Retorna:
+            dict: Histórico do treinamento com 'loss', 'accuracy' e opcionalmente
+                  'val_accuracy' por época
+        """
+        optimizer = SGD(learning_rate=learning_rate)
+        n_samples = X_train.shape[0]
+        
+        # Histórico para plots depois
+        history = {
+            'loss': [],
+            'accuracy': [],
+            'val_accuracy': []
+        }
+        
+        for epoch in range(epochs):
+            # 1. Embaralha os dados a cada época
+            indices = np.random.permutation(n_samples)
+            X_shuffled = X_train[indices]
+            y_shuffled = y_train[indices]
+            
+            epoch_loss = 0.0
+            num_batches = 0
+            
+            # 2. Itera pelos mini-batches
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                X_batch = X_shuffled[start:end]
+                y_batch = y_shuffled[start:end]
+                
+                # 3a. Forward pass
+                y_pred = self.forward(X_batch)
+                
+                # 3b. Calcula a loss do batch
+                batch_loss = cross_entropy_loss(y_pred, y_batch)
+                epoch_loss += batch_loss
+                num_batches += 1
+                
+                # 3c. Backward pass (calcula gradientes)
+                grad_weights, grad_biases = self.backward(y_batch)
+                
+                # 3d. Atualiza pesos
+                optimizer.update(self.weights, self.biases, grad_weights, grad_biases)
+            
+            # 4. Registra métricas da época
+            avg_loss = epoch_loss / num_batches
+            history['loss'].append(avg_loss)
+            
+            # Calcula acurácia no treino
+            train_pred = self.predict(X_train)
+            train_true = np.argmax(y_train, axis=1)
+            train_acc = np.mean(train_pred == train_true)
+            history['accuracy'].append(train_acc)
+            
+            # Calcula acurácia na validação (se fornecida)
+            val_acc_str = ""
+            if X_val is not None and y_val is not None:
+                val_pred = self.predict(X_val)
+                val_true = np.argmax(y_val, axis=1)
+                val_acc = np.mean(val_pred == val_true)
+                history['val_accuracy'].append(val_acc)
+                val_acc_str = f" | Val Acc: {val_acc:.4f}"
+            
+            print(f"Época {epoch + 1}/{epochs} | Loss: {avg_loss:.4f} | "
+                  f"Train Acc: {train_acc:.4f}{val_acc_str}")
+        
+        return history
